@@ -8,7 +8,6 @@ import {
   Plus,
   RefreshCw,
   Trash2,
-  Upload,
 } from 'lucide-react'
 import { createWorker, PSM } from 'tesseract.js'
 import {
