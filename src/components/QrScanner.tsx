@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { Camera, LoaderCircle } from 'lucide-react'
 import { Html5Qrcode } from 'html5-qrcode'
 import { fetchNfceData } from '../services/nfceClient'
+import type { ParsedReceipt } from '../services/nfceParser'
 
-type Props = { onDecoded: (value: string) => void }
+type Props = { onDecoded: (value: string) => void; onReceiptData?: (data: ParsedReceipt) => void }
 
 function fillInput(placeholder: string, value: string) {
   const input = document.querySelector<HTMLInputElement>(`input[placeholder="${placeholder}"]`)
@@ -13,7 +14,7 @@ function fillInput(placeholder: string, value: string) {
   input.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
-export function QrScanner({ onDecoded }: Props) {
+export function QrScanner({ onDecoded, onReceiptData }: Props) {
   const scanner = useRef<Html5Qrcode | null>(null)
   const [error, setError] = useState('')
   const [starting, setStarting] = useState(true)
@@ -33,6 +34,7 @@ export function QrScanner({ onDecoded }: Props) {
         void fetchNfceData(value)
           .then((data) => {
             setLookup(data)
+            onReceiptData?.(data)
             if (data.storeName) fillInput('Nome da loja', data.storeName)
             if (data.total !== undefined) fillInput('0,00', data.total.toLocaleString('pt-BR', { minimumFractionDigits: 2 }))
             if (data.items[0]) fillInput('Produto', data.items[0].name)
