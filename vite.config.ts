@@ -9,8 +9,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
       manifest: {
-        name: 'NotaControl',
-        short_name: 'NotaControl',
+        name: 'TakeNotes',
+        short_name: 'TakeNotes',
         id: '/',
         lang: 'pt-BR',
         description: 'Controle financeiro pessoal a partir das suas notas fiscais.',
