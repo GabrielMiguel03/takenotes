@@ -182,10 +182,11 @@ export function parseReceiptText(text: string): ParsedReceipt {
     line => line.length > 3 && !/cnpj|cpf|documento|consumidor|chave|total|cupom|nota fiscal|endere[cç]|sit\.|data/i.test(line),
   )
 
-  const items = lines.map(line => {
-    if (SKIP_LINE_RE.test(line)) return undefined
+  const items: ParsedReceiptItem[] = []
+  for (const line of lines) {
+    if (SKIP_LINE_RE.test(line)) continue
     const all = [...line.matchAll(moneyRe())]
-    if (!all.length) return undefined
+    if (!all.length) continue
     const last = all[all.length - 1]
     const price = last[0]
     let before = line.slice(0, last.index ?? line.length).trim()
@@ -213,11 +214,11 @@ export function parseReceiptText(text: string): ParsedReceipt {
         .replace(/\b\d+\s*(?:UN|KG|GR?|ML|LT?)\b/gi, '')
         .replace(/\b\d+([,.]?\d+)?\s*x\s*/gi, ''),
     )
-    if (name.length < 2 || /^\d+$/.test(name)) return undefined
+    if (name.length < 2 || /^\d+$/.test(name)) continue
     const totalPrice = parseBRL(price)
-    if (!isFinite(totalPrice) || totalPrice <= 0) return undefined
-    return { name, totalPrice, itemIndex }
-  }).filter((item): item is ParsedReceiptItem => Boolean(item))
+    if (!isFinite(totalPrice) || totalPrice <= 0) continue
+    items.push({ name, totalPrice, itemIndex })
+  }
 
   return { total, storeName, cnpj, lines, items: dedupe(items) }
 }
