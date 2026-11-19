@@ -12,6 +12,7 @@ export type ParsedReceipt = {
   total?: number
   storeName?: string
   cnpj?: string
+  paymentMethod?: string
   lines: string[]
   items: ParsedReceiptItem[]
   duplicatesRemoved?: number
@@ -52,11 +53,33 @@ function cleanProductName(raw: string): string {
     .trim()
 }
 
-// ─── Palavras-chave de exclusão de linha ──────────────────────────────────────
+// ─── Linhas que devem ser descartadas do processamento ────────────────────────
 
-const SKIP_LINE_RE = /\b(total|troco|desconto|pagamento|subtotal|cnpj|cpf|documento|chave|cupom|nota fiscal|forma de|endere[cç]|fone|tel\b|sit\.|data\s+emiss|n[uú]mero|insc|iest|uf\b|cod\.?\s*bar|via\s+do|contribui|tributad|cst\b|icms|ipi\b|cfop|ncm\b|un\s+med|vl\s+unit|qtd?\.?\s*\d|qt\b|sat|ecf\b|dv\b)\b/i
+function isStatusOrBrowserJunk(line: string): boolean {
+  const l = line.trim().toLowerCase()
+  // Relógio do celular no topo (ex: "17:47", "17:47 86%", "17:49", "12:30:15")
+  if (/^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–;.,]\s*[a-z0-9]+|\s+\d{1,3}%)?$/i.test(l)) return true
+  // URL de navegador ou cabeçalhos do browser
+  if (/(?:alsped|fazenda|sefaz|receita|\.gov\.br|\.br\b|http:\/\/|https:\/\/|www\.)/i.test(l)) return true
+  // Barra de pesquisa do site ("Filtrar itens...", "Pesquisar")
+  if (/^(?:filtrar|pesquisar|buscar)\s*(?:[ií]tens?|produtos?)?/i.test(l)) return true
+  // Botões de sanfona da SEFAZ
+  if (/^[+⊕]?\s*(?:consumidor|chave\s+de\s+acesso|informa[cç][oõ]es|consulta|dados\s+da\s+nota)/i.test(l)) return true
+  // Porcentagem de bateria isolada
+  if (/^\d{1,3}%$/.test(l)) return true
+  return false
+}
 
-// ─── Parser principal de HTML SEFAZ ──────────────────────────────────────────
+function isFooterOrPayment(line: string): boolean {
+  const l = line.trim().toLowerCase()
+  // Formas de pagamento (ex: "Valor pago R$ 350.00", "01 - Dinheiro", "Forma de Pagamento")
+  if (/(?:valor\s+pago|forma\s+de\s+pagamento|\b\d{2}\s*-\s*(?:dinheiro|cart[aã]o|pix|cheque|cr[eé]dito|d[eé]bito|vale))/i.test(l)) return true
+  // Totais do rodapé
+  if (/(?:valor\s+total\s*r\$|qtde\s+total\s+de\s+[ií]tens|troco|desconto|subtotal|tributos?|vl\.?\s*tributos?)/i.test(l)) return true
+  return false
+}
+
+// ─── Parser de HTML SEFAZ (quando consulta direta funciona) ──────────────────
 
 function parseNfceHtml(html: string): ParsedReceipt {
   const doc = new DOMParser().parseFromString(html, 'text/html')
@@ -143,7 +166,7 @@ function parseNfceHtml(html: string): ParsedReceipt {
     })
   }
 
-  // Estratégia 3: fallback para texto
+  // Estratégia 3: fallback para texto puro
   if (!items.length) {
     return { ...parseReceiptText(doc.body.textContent ?? ''), storeName: storeName ?? undefined, cnpj: cnpj ?? undefined, total: total }
   }
@@ -166,61 +189,172 @@ function dedupe<T extends { name: string; totalPrice?: number }>(items: T[]): T[
   )
 }
 
-// ─── Parser de texto puro (OCR ou fallback) ───────────────────────────────────
+// ─── Parser de Texto Inteligente (OCR de Prints SEFAZ e Notas em Papel) ───────
 
 export function parseReceiptText(text: string): ParsedReceipt {
   const normalized = text.replace(/[|]/g, ' ').replace(/\r/g, '')
-  const lines = normalized.split('\n').map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean)
+  const rawLines = normalized
+    .split('\n')
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
 
-  const totalMatch = normalized.match(
-    /(?:TOTAL(?:\s+A\s+PAGAR)?|VALOR\s+A\s+PAGAR|VALOR\s+TOTAL)[^\d]*(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2}|\d+[,.]?\d{2})/i,
-  )
-  const total = totalMatch ? parseBRL(totalMatch[1]) : undefined
+  // Filtra lixo de status bar do celular e barra de navegação
+  const lines = rawLines.filter(line => !isStatusOrBrowserJunk(line))
+
+  // 1) Encontra o Total da Nota com precisão (busca no rodapé linhas sem 'Código' e sem 'Qtde')
+  let total: number | undefined
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]
+    if (/\b(?:c[oó]d(?:igo)?|itens:\s*\d|qtde\s+total\s+de\s+[ií]tens:\s*\d)/i.test(line)) continue
+    // Padrão: "Valor total R$ 657.18" ou "Valor total R$: 657,18" ou "TOTAL A PAGAR: R$ 657,18"
+    const m = line.match(/(?:VALOR\s+TOTAL(?:\s*R\$)?|TOTAL(?:\s+A\s+PAGAR)?|VALOR\s+A\s+PAGAR)\s*(?:R\$\s*)?[:=]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+[.,]\d{2})/i)
+    if (m) {
+      const val = parseBRL(m[1])
+      if (val > 0) {
+        total = val
+        break
+      }
+    }
+  }
+
+  // 2) CNPJ
   const cnpj = normalized.match(/\d{2}[.\s]?\d{3}[.\s]?\d{3}[\/\s]?\d{4}[-\s]?\d{2}/)?.[0]
 
-  const storeName = lines.find(
-    line => line.length > 3 && !/cnpj|cpf|documento|consumidor|chave|total|cupom|nota fiscal|endere[cç]|sit\.|data/i.test(line),
-  )
+  // 3) Nome da Loja / Estabelecimento
+  // Pega a primeira linha com texto legítimo do cabeçalho que não seja endereço puro nem palavra técnica
+  const storeNameCandidate = lines.find(line => {
+    if (line.length < 3 || line.length > 80) return false
+    if (/cnpj|cpf|documento|chave|total|nota\s+fiscal|filtar|cupom|endereço|bairro|cep/i.test(line)) return false
+    if (/^(?:rua|av\.|avenida|rod\.|rodovia|praça)\b/i.test(line)) return false
+    if (/\b(?:sefaz|fazenda|alsped)\b/i.test(line)) return false
+    return true
+  })
+  const storeName = storeNameCandidate?.replace(/^[^A-Za-zÀ-ÿ]+/, '').trim()
 
-  const items: ParsedReceiptItem[] = []
+  // 4) Forma de Pagamento (ex: "01 - Dinheiro", "Dinheiro", "Cartão de Crédito", "Pix")
+  let paymentMethod: string | undefined
   for (const line of lines) {
-    if (SKIP_LINE_RE.test(line)) continue
-    const all = [...line.matchAll(moneyRe())]
-    if (!all.length) continue
-    const last = all[all.length - 1]
-    const price = last[0]
-    let before = line.slice(0, last.index ?? line.length).trim()
+    if (/dinheiro/i.test(line)) { paymentMethod = 'cash'; break }
+    if (/pix/i.test(line)) { paymentMethod = 'pix'; break }
+    if (/cr[eé]dito/i.test(line)) { paymentMethod = 'credit'; break }
+    if (/d[eé]bito/i.test(line)) { paymentMethod = 'debit'; break }
+    if (/vale|alimenta[cç][aã]o|refei[cç][aã]o/i.test(line)) { paymentMethod = 'benefit'; break }
+  }
 
-    // Extrai índice do item se presente (ex.: "001 ARROZ", "1 ARROZ", "#02 FEIJÃO")
-    let itemIndex: number | undefined
-    const idxMatch = before.match(/^#?\s*0*([1-9]\d{0,2})\b/)
-    if (idxMatch) {
-      const parsed = parseInt(idxMatch[1], 10)
-      if (parsed > 0 && parsed < 1000) {
-        itemIndex = parsed
-        before = before.slice(idxMatch[0].length).trim()
+  // 5) Extração Inteligente de Itens da Tabela SEFAZ (incluindo nomes quebrados em 2 linhas)
+  const items: ParsedReceiptItem[] = []
+  let pendingNamePart = ''
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+
+    // Ignora linhas de rodapé ou pagamento para não virarem produtos
+    if (isFooterOrPayment(line)) {
+      pendingNamePart = ''
+      continue
+    }
+
+    // Extrai o preço real do item:
+    // Na SEFAZ vem como: "Valor total R$: R$ 10,89" ou "Valor total R$: 10.89"
+    // Ou no final da linha: "R$ 10,89"
+    let itemPrice: number | undefined
+    let rawItemText = line
+
+    const sefazPriceMatch = line.match(/Valor\s+total\s*R\$\s*[:=]?\s*(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2}|\d+[.,]\d{2})/i)
+    if (sefazPriceMatch) {
+      itemPrice = parseBRL(sefazPriceMatch[1])
+      // Remove a seção de preço da linha para sobrar o nome
+      rawItemText = line.slice(0, sefazPriceMatch.index).trim()
+    } else {
+      // Procura último padrão de moeda que NÃO seja uma quantidade de 4 casas (como 1.0000 ou 0.3020)
+      const allPrices = [...line.matchAll(moneyRe())].filter(m => {
+        const fullMatch = m[0]
+        // Se após o match tiver mais dígitos (ex: "1.0000" onde match pegou "1.00"), é quantidade!
+        const after = line.slice((m.index ?? 0) + fullMatch.length, (m.index ?? 0) + fullMatch.length + 3)
+        if (/^\d{2}/.test(after)) return false
+        return true
+      })
+
+      if (allPrices.length) {
+        const last = allPrices[allPrices.length - 1]
+        itemPrice = parseBRL(last[0])
+        rawItemText = line.slice(0, last.index ?? line.length).trim()
       }
     }
 
-    // Remove referências a código do produto
-    before = before
+    // Extrai quantidade se presente (ex: "Qtde total de ítens: 1.0000" ou "Qtd: 2.000")
+    let quantity: number | undefined
+    const qtyMatch = line.match(/(?:Qtde(?:\s+total)?(?:\s+de\s+[ií]tens)?|Qtd)\s*[:=]?\s*(\d+(?:[.,]\d+)?)/i)
+    if (qtyMatch) {
+      quantity = parseBRL(qtyMatch[1])
+    }
+
+    // Limpa referências a colunas de quantidade, unidade e códigos de produto do texto do nome
+    let cleanedLineName = rawItemText
+      .replace(/Qtde(?:\s+total)?(?:\s+de\s+[ií]tens)?\s*[:=]?\s*\d+(?:[.,]\d+)?/gi, '')
+      .replace(/\bUN\s*:\s*[A-Z]{1,3}\b/gi, '')
       .replace(/\(c[oó]d(?:igo)?\.?:?\s*\d+\)/gi, '')
       .replace(/\bc[oó]d(?:igo)?\.?:?\s*\d+\b/gi, '')
       .replace(/^\d{4,}\s*/, '')
+      .trim()
 
-    const name = cleanProductName(
-      before
-        .replace(/^\d{3,}\s*/, '')
-        .replace(/\b\d+\s*(?:UN|KG|GR?|ML|LT?)\b/gi, '')
-        .replace(/\b\d+([,.]?\d+)?\s*x\s*/gi, ''),
-    )
-    if (name.length < 2 || /^\d+$/.test(name)) continue
-    const totalPrice = parseBRL(price)
-    if (!isFinite(totalPrice) || totalPrice <= 0) continue
-    items.push({ name, totalPrice, itemIndex })
+    // Se a linha NÃO tem preço:
+    // Provavelmente é a primeira linha de um nome quebrado (ex: "FEIJAO UGOBOM 1kg")
+    if (!itemPrice || itemPrice <= 0) {
+      // Se a linha tem caracteres de texto substanciais e não é cabeçalho técnico:
+      if (cleanedLineName.length >= 3 && !/^(?:total|subtotal|cnpj|cpf|forma\s+de)/i.test(cleanedLineName)) {
+        pendingNamePart = cleanedLineName
+      }
+      continue
+    }
+
+    // A linha TEM preço!
+    // Se tínhamos um pedaço de nome na linha anterior, juntamos (ex: "FEIJAO UGOBOM 1kg" + "CARIOCA T1")
+    let finalName = cleanedLineName
+    if (pendingNamePart) {
+      finalName = `${pendingNamePart} ${cleanedLineName}`.trim()
+      pendingNamePart = ''
+    }
+
+    finalName = cleanProductName(finalName)
+
+    // Se o nome ficou muito curto ou só sobrou números / símbolos, ignora
+    if (finalName.length < 2 || /^[\d\s.,;:-]+$/.test(finalName)) {
+      continue
+    }
+
+    // Tenta extrair itemIndex se a linha começar com número (ex: "001 ARROZ")
+    let itemIndex: number | undefined
+    const idxMatch = finalName.match(/^#?\s*0*([1-9]\d{0,2})\b/)
+    if (idxMatch) {
+      itemIndex = parseInt(idxMatch[1], 10)
+      finalName = cleanProductName(finalName.slice(idxMatch[0].length))
+    }
+
+    items.push({
+      name: finalName,
+      totalPrice: itemPrice,
+      quantity: quantity || 1,
+      unitPrice: quantity && quantity > 0 ? parseFloat((itemPrice / quantity).toFixed(2)) : itemPrice,
+      itemIndex,
+    })
   }
 
-  return { total, storeName, cnpj, lines, items: dedupe(items) }
+  // Se o total não foi encontrado explicitamente no rodapé mas temos itens, soma
+  const calculatedTotal = total ?? (
+    items.length
+      ? parseFloat(items.reduce((s, it) => s + (it.totalPrice ?? 0), 0).toFixed(2))
+      : undefined
+  )
+
+  return {
+    total: calculatedTotal,
+    storeName,
+    cnpj,
+    paymentMethod,
+    lines,
+    items: dedupe(items),
+  }
 }
 
 // ─── Extrai informações básicas do URL do QR Code ────────────────────────────
@@ -271,12 +405,10 @@ function stringSimilarity(s1: string, s2: string): number {
 }
 
 export function areItemsDuplicate(a: ParsedReceiptItem, b: ParsedReceiptItem): boolean {
-  // Se ambos têm itemIndex, a identificação é direta
   if (a.itemIndex !== undefined && b.itemIndex !== undefined) {
     return a.itemIndex === b.itemIndex
   }
 
-  // Preço idêntico (tolerância de até R$ 0.05 para pequenas variações de OCR)
   const priceA = a.totalPrice ?? 0
   const priceB = b.totalPrice ?? 0
   if (Math.abs(priceA - priceB) > 0.05) return false
@@ -286,7 +418,6 @@ export function areItemsDuplicate(a: ParsedReceiptItem, b: ParsedReceiptItem): b
   if (!normA || !normB) return false
   if (normA === normB) return true
 
-  // Substring match para produtos com nomes mais longos
   if (normA.length >= 5 && normB.length >= 5) {
     if (normA.includes(normB) || normB.includes(normA)) return true
     if (stringSimilarity(normA, normB) >= 0.72) return true
@@ -295,13 +426,6 @@ export function areItemsDuplicate(a: ParsedReceiptItem, b: ParsedReceiptItem): b
   return false
 }
 
-/**
- * Mescla duas listas de itens identificando a sobreposição de rolagem (scroll overlap).
- * Exemplo:
- * Print 1: [Item 1, Item 2, Item 3, Item 4]
- * Print 2: [Item 3, Item 4, Item 5, Item 6]
- * Resultado: [Item 1, Item 2, Item 3, Item 4, Item 5, Item 6] (2 duplicatas eliminadas)
- */
 function mergeTwoItemLists(
   listA: ParsedReceiptItem[],
   listB: ParsedReceiptItem[],
@@ -311,7 +435,6 @@ function mergeTwoItemLists(
 
   const maxOverlap = Math.min(listA.length, listB.length)
 
-  // 1. Testa se o fim de A se sobrepõe ao início de B (scroll natural para baixo)
   for (let k = maxOverlap; k >= 1; k--) {
     let matchCount = 0
     for (let i = 0; i < k; i++) {
@@ -328,7 +451,6 @@ function mergeTwoItemLists(
     }
   }
 
-  // 2. Testa se o fim de B se sobrepõe ao início de A (caso selecionados na ordem inversa)
   for (let k = maxOverlap; k >= 1; k--) {
     let matchCount = 0
     for (let i = 0; i < k; i++) {
@@ -345,7 +467,6 @@ function mergeTwoItemLists(
     }
   }
 
-  // 3. Fallback: sobreposição não-contígua / itens esparsos
   let dupes = 0
   const result = [...listA]
   for (const itemB of listB) {
@@ -360,10 +481,6 @@ function mergeTwoItemLists(
   return { merged: result, dupes }
 }
 
-/**
- * Mescla múltiplos resultados de OCR (por exemplo, 2 ou mais prints da mesma nota).
- * Mantém o cabeçalho, total e elimina automaticamente os itens repetidos das áreas de sobreposição.
- */
 export function mergeParsedReceipts(receipts: ParsedReceipt[]): ParsedReceipt {
   if (!receipts.length) {
     return { lines: [], items: [] }
@@ -374,6 +491,7 @@ export function mergeParsedReceipts(receipts: ParsedReceipt[]): ParsedReceipt {
 
   const storeName = receipts.find(r => r.storeName)?.storeName
   const cnpj = receipts.find(r => r.cnpj)?.cnpj
+  const paymentMethod = receipts.find(r => r.paymentMethod)?.paymentMethod
   const total = receipts.slice().reverse().find(r => r.total !== undefined)?.total
   const allLines = receipts.flatMap(r => r.lines)
 
@@ -395,6 +513,7 @@ export function mergeParsedReceipts(receipts: ParsedReceipt[]): ParsedReceipt {
   return {
     storeName,
     cnpj,
+    paymentMethod,
     total: finalTotal,
     lines: allLines,
     items: dedupe(mergedItems),
