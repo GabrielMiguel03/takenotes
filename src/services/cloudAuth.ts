@@ -25,3 +25,8 @@ export async function signIn(email: string, password: string) {
 export async function signOut(token: string) {
   if (cloudEnabled) await fetch(`${url}/auth/v1/logout`, { method: 'POST', headers: headers(token) })
 }
+
+export const signInWithGoogle = () => {
+  if (!cloudEnabled) throw new Error('Backend não configurado')
+  window.location.assign(`${url}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(window.location.origin)}`)
+}
