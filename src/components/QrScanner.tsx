@@ -5,6 +5,7 @@ import {
   ClipboardPaste,
   ExternalLink,
   FileText,
+  Images,
   LoaderCircle,
   Pencil,
   X,
@@ -189,11 +190,11 @@ export function QrScanner({ onDecoded, onReceiptData }: Props) {
                 </li>
                 <li>
                   <span className="font-bold text-brand-400">3.</span>{' '}
-                  <strong>Tire um print</strong> da tela com a nota aberta.
+                  <strong>Tire um ou mais prints</strong> da nota (se for longa, role a tela e tire mais prints).
                 </li>
                 <li>
                   <span className="font-bold text-brand-400">4.</span>{' '}
-                  Volte aqui e toque em <strong>"Selecionar print"</strong>.
+                  Volte aqui e toque em <strong>"Selecionar prints"</strong>. O app junta tudo e elimina itens repetidos!
                 </li>
               </ol>
               <div className="grid grid-cols-2 gap-2">
@@ -208,7 +209,7 @@ export function QrScanner({ onDecoded, onReceiptData }: Props) {
                   onClick={triggerOcr}
                   className="flex items-center justify-center gap-1.5 rounded-xl bg-brand-500 px-3 py-2.5 text-xs font-bold text-slate-950"
                 >
-                  <Camera size={14} /> Selecionar print
+                  <Images size={14} /> Selecionar prints
                 </button>
               </div>
               {/* Atalho: abre URL + muda para OCR de uma vez */}
