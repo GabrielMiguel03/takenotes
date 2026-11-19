@@ -6,6 +6,11 @@
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
 [[headers]]
   for = "/*"
   [headers.values]
@@ -21,3 +26,4 @@
   for = "/.netlify/functions/nfce-proxy"
   [headers.values]
     Cache-Control = "no-store"
+
